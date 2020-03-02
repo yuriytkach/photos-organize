@@ -27,27 +27,106 @@ class CustomFormatter(argparse.RawDescriptionHelpFormatter,
 cache_loc = {}
 
 
-# Print iterations progress
-def print_progress_bar(iteration, total, prefix='', suffix='', decimals=1, length=100, fill='█', print_end="\r"):
-    """
-    Call in a loop to create terminal progress bar
-    @params:
-        iteration   - Required  : current iteration (Int)
-        total       - Required  : total iterations (Int)
-        prefix      - Optional  : prefix string (Str)
-        suffix      - Optional  : suffix string (Str)
-        decimals    - Optional  : positive number of decimals in percent complete (Int)
-        length      - Optional  : character length of bar (Int)
-        fill        - Optional  : bar fill character (Str)
-        printEnd    - Optional  : end character (e.g. "\r", "\r\n") (Str)
-    """
-    percent = ("{0:." + str(decimals) + "f}").format(100 * (iteration / float(total)))
-    filled_length = int(length * iteration // total)
-    bar = fill * filled_length + '-' * (length - filled_length)
-    print('\r%s |%s| %s%% %s' % (prefix, bar, percent, suffix), end=print_end)
-    # Print New Line on Complete
-    if iteration == total:
-        print()
+class FileInfo:
+    def __init__(self, full_path):
+        self.full_path = full_path
+        self.name = os.path.basename(full_path)
+
+        self.errors = []
+
+        rez, err = self.extract_exif()
+        if err:
+            self.errors.append(err)
+        self.exif = rez
+
+        rez, err = self.extract_date_from_exif()
+        if err:
+            self.errors.append(err)
+        self.exif_mod_date = rez
+
+        rez, err = self.extract_file_datetime()
+        if err:
+            self.errors.append(err)
+        self.file_mod_date = rez
+
+        if self.exif:
+            rez, err = extract_location_from_exif(self.exif)
+            if err:
+                self.errors.append(err)
+            self.location = rez
+        else:
+            self.location = None
+
+    def has_errors(self):
+        return len(self.errors) > 0
+
+    def get_mod_date(self):
+        return self.exif_mod_date if self.exif_mod_date else self.file_mod_date
+
+    def format_mod_date(self):
+        return self.get_mod_date().strftime("%Y-%m-%d") if self.get_mod_date() else "None"
+
+    def is_processable(self):
+        return self.get_mod_date() is not None
+
+    def extract_exif(self):
+        if self.full_path.lower().endswith(('.jpg', '.jpeg')):
+            try:
+                img = Image.open(self.full_path)
+            except Exception as err:
+                return None, err
+            else:
+                return {
+                    ExifTags.TAGS[k]: v
+                    for k, v in img._getexif().items()
+                    if k in ExifTags.TAGS
+                }, None
+        else:
+            return None, None
+
+    def extract_file_datetime(self):
+        try:
+            stat = os.stat(self.full_path)
+        except Exception as err:
+            return None, err
+        else:
+            tt = stat.st_mtime
+            return datetime.fromtimestamp(tt), None
+
+    def extract_date_from_exif(self):
+        if self.exif and "DateTime" in self.exif:
+            try:
+                return datetime.strptime(self.exif["DateTime"], '%Y:%m:%d %H:%M:%S'), None
+            except Exception as err:
+                return None, err
+        else:
+            return None, None
+
+    def get_location_place(self):
+        if self.location:
+            addr = self.location.raw["address"]
+
+            place = find_place(addr, ["theme_park", "museum", "beach", "suburb"])
+
+            city_places = ["village", "town", "city"]
+            if "suburb" in addr and place != addr["suburb"]:
+                city_places.insert(0, "suburb")
+
+            city = find_place(addr, city_places)
+
+            if not place and not city:
+                return self.location.address
+            else:
+                if city:
+                    city_str = city + '-' if place else city
+                else:
+                    city_str = ''
+                place_str = place if place else ''
+
+                loc = f"{city_str}{place_str}".replace("/", "-").replace(".", "-").replace(":", "-")
+                return loc
+        else:
+            return "Unknown"
 
 
 def parse_args(args):
@@ -63,6 +142,11 @@ def parse_args(args):
                    required=True,
                    help="Directory to scan")
 
+    g.add_argument("-f", "--force", "--no-confirmation",
+                   action="store_true",
+                   default=True,
+                   help="Perform files movement without confirmation")
+
     g.add_argument("--dry-run",
                    action="store_true",
                    help="Perform dry run without changes")
@@ -70,60 +154,114 @@ def parse_args(args):
     return parser.parse_args(args)
 
 
-def organize(options):
-    directory = os.path.expanduser(options.dir)
-    print(f"Processing {directory}")
+def retrieve_file_info(directory, options):
+    only_files = [f for f in os.listdir(directory) if isfile(join(directory, f))]
+    files = []
+    for file in tqdm(only_files):
+        file_info = FileInfo(join(directory, file))
+        files.append(file_info)
 
+    print(f"Processed files: {len(files)}")
+    with_errors = list(filter(lambda f: f.has_errors(), files))
+    print(f"With errors: {len(with_errors)}")
+    for file_info in with_errors:
+        print(f"{file_info.name} - {file_info.errors}")
+
+    processable = list(filter(lambda f: f.is_processable(), files))
+
+    fixed = fix_locations(processable)
+
+    print(f"Fixed processable files: {len(fixed)}")
+    if options.force or confirm():
+        move_files(fixed, directory, options)
+
+
+def fix_locations(processable):
+    processable.sort(key=lambda f: f.get_mod_date())
+
+    for i, f in enumerate(processable):
+        if not f.location:
+            try:
+                find_location_around(processable, i)
+            except Exception as err:
+                print(f"Error on {i}: {err}")
+
+    return processable
+
+
+def find_location_around(files, i):
+    if i > 0:
+        before_datetime = files[i-1].get_mod_date()
+        loc = files[i-1].location
+        diff = files[i].get_mod_date() - before_datetime
+        check_and_update_location(diff, files, i, loc)
+
+    if not files[i].location and i < len(files)-1:
+        after_datetime, loc = find_next_with_loc(files, i+1)
+        if after_datetime:
+            diff = after_datetime - files[i].get_mod_date()
+            check_and_update_location(diff, files, i, loc)
+
+
+def find_next_with_loc(files, start):
+    for x in range(start, len(files)):
+        if files[x].location:
+            return files[x].get_mod_date(), files[x].location
+    return None, None
+
+
+def check_and_update_location(diff, files, i, loc):
+    mins = divmod(diff.total_seconds(), 60)[0]
+    if mins < 30:
+        files[i].location = loc
+
+
+def move_files(files, directory, options):
     groups = {}
+    for f in files:
+        f_date = f.format_mod_date()
+        if f_date not in groups:
+            groups[f_date] = {}
 
-    onlyfiles = [f for f in os.listdir(directory) if isfile(join(directory, f))]
-    for f in tqdm(onlyfiles):
-        full_path = join(directory, f)
-        try:
-            stat = os.stat(full_path)
-            exif = extract_exif(full_path)
-            town = find_town_by_exif_gps(exif, f)
-        except Exception as err:
-            print(f"Failed to get info about {full_path}: {err}")
-        else:
-            mod_date = extract_date_from_file_or_exif(exif, stat)
+        f_loc = f.get_location_place()
+        if f_loc not in groups[f_date]:
+            groups[f_date][f_loc] = []
 
-            if mod_date not in groups:
-                groups[mod_date] = {}
+        groups[f_date][f_loc].append(f)
 
-            if town not in groups[mod_date]:
-                groups[mod_date][town] = []
-
-            groups[mod_date][town].append(full_path)
-
-    print("Copying files")
+    if options.dry_run:
+        print("Dry run, so no movements are done")
 
     for key_date in tqdm(groups):
         sub_dir_date = join(directory, key_date)
 
-        if not options.dry_run:
+        if not options.dry_run and not os.path.exists(sub_dir_date):
             os.mkdir(sub_dir_date)
 
-        for key_town in tqdm(groups[key_date], leave=False):
-            sub_dir_town = join(sub_dir_date, key_town)
+        for key_loc in tqdm(groups[key_date], leave=False):
+            sub_dir_loc = join(sub_dir_date, key_loc)
 
-            if not options.dry_run:
-                os.mkdir(sub_dir_town)
+            if not options.dry_run and not os.path.exists(sub_dir_loc):
+                os.mkdir(sub_dir_loc)
 
-            for f in tqdm(groups[key_date][key_town], leave=False):
+            for f in tqdm(groups[key_date][key_loc], leave=False):
                 if not options.dry_run:
-                    shutil.copy(f, join(sub_dir_town, os.path.basename(f)))
+                    shutil.move(f.full_path, join(sub_dir_loc, f.name))
 
 
-def extract_date_from_file_or_exif(exif, stat):
-    mod_date = extract_date_from_exif(exif)
-    if not mod_date:
-        tt = stat.st_mtime
-        mod_date = strftime("%Y-%m-%d", time.localtime(tt))
-    return mod_date
+def confirm():
+    """
+    Ask user to enter Y or N (case-insensitive).
+    :return: True if the answer is Y.
+    :rtype: bool
+    """
+    answer = ""
+    while answer not in ["y", "n"]:
+        answer = input("Do you want to continue [Y/N]? ").lower()
+    return answer == "y"
 
 
-def save_to_cache_location(coords, location):
+def save_cache_location(coords, location):
     key = create_cache_loc_key(coords)
     cache_loc[key] = location
 
@@ -140,46 +278,25 @@ def create_cache_loc_key(coords):
     return key
 
 
-def find_town_by_exif_gps(exif, filename):
-    if exif:
-        geotags = get_geotagging(exif)
-        if geotags:
-            try:
-                coords = get_coordinates(geotags)
-                if coords["lat"] and coords["lon"]:
-                    cached_location = find_cache_location(coords)
-                    if cached_location:
-                        return cached_location
+def extract_location_from_exif(exif):
+    geotags = get_geotagging(exif)
+    if geotags:
+        try:
+            coords = get_coordinates(geotags)
+            if coords["lat"] and coords["lon"]:
+                cached_location = find_cache_location(coords)
+                if cached_location:
+                    return cached_location, None
+                else:
                     location = find_geo_location(coords)
-                else:
-                    return "Unknown"
-            except Exception as err:
-                print(f"Failed to get geo town: {err} : {filename}")
+                    save_cache_location(coords, location)
+                    return location, None
             else:
-                addr = location.raw["address"]
-
-                place = find_place(addr, ["theme_park", "museum", "beach", "suburb"])
-
-                city_places = ["village", "town", "city"]
-                if "suburb" in addr and place != addr["suburb"]:
-                    city_places.insert(0, "suburb")
-
-                city = find_place(addr, city_places)
-
-                if not place and not city:
-                    return location.address
-                else:
-                    if city:
-                        city_str = city + '-' if place else city
-                    else:
-                        city_str = ''
-                    place_str = place if place else ''
-
-                    loc = f"{city_str}{place_str}".replace("/", "-").replace(".", "-").replace(":", "-")
-                    save_to_cache_location(coords, loc)
-                    return loc
-
-    return "Unknown"
+                return None, None
+        except Exception as err:
+            return None, err
+    else:
+        return None, None
 
 
 def find_geo_location(coords):
@@ -232,28 +349,6 @@ def get_geotagging(exif):
     return None
 
 
-def extract_date_from_exif(exif):
-    if exif and "DateTime" in exif:
-        try:
-            tt = datetime.strptime(exif["DateTime"], '%Y:%m:%d %H:%M:%S')
-            return tt.strftime("%Y-%m-%d", )
-        except Exception as err:
-            print(err)
-    return None
-
-
-def extract_exif(full_path):
-    if full_path.lower().endswith(('.jpg', '.jpeg')):
-        img = Image.open(full_path)
-        return {
-            ExifTags.TAGS[k]: v
-            for k, v in img._getexif().items()
-            if k in ExifTags.TAGS
-        }
-    else:
-        return None
-
-
 def main(argv):
     try:
         options = parse_args(argv[1:])
@@ -261,7 +356,9 @@ def main(argv):
             print("DRY RUN")
             print("-------")
 
-        organize(options)
+        directory = os.path.expanduser(options.dir)
+        print(f"Processing {directory}")
+        retrieve_file_info(directory, options)
 
         print("Finished")
     except Exception as err:
