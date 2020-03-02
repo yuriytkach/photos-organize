@@ -9,7 +9,6 @@ import sys
 import argparse
 import os
 import time
-from time import strftime
 import shutil
 from tqdm import tqdm
 from PIL import Image
@@ -144,7 +143,7 @@ def parse_args(args):
 
     g.add_argument("-f", "--force", "--no-confirmation",
                    action="store_true",
-                   default=True,
+                   default=False,
                    help="Perform files movement without confirmation")
 
     g.add_argument("--dry-run",
