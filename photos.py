@@ -93,13 +93,23 @@ class FileInfo:
             return datetime.fromtimestamp(tt), None
 
     def extract_date_from_exif(self):
-        if self.exif and "DateTime" in self.exif:
+        val = self.read_exif_value("DateTimeOriginal")
+        if not val:
+            val = self.read_exif_value("DateTime")
+
+        if val:
             try:
-                return datetime.strptime(self.exif["DateTime"], '%Y:%m:%d %H:%M:%S'), None
+                return datetime.strptime(val, '%Y:%m:%d %H:%M:%S'), None
             except Exception as err:
                 return None, err
         else:
             return None, None
+
+    def read_exif_value(self, key):
+        if self.exif and key in self.exif:
+            return self.exif[key]
+        else:
+            return None
 
     def get_location_place(self):
         if self.location:
