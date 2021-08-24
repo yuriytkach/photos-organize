@@ -113,27 +113,30 @@ class FileInfo:
 
     def get_location_place(self):
         if self.location:
-            addr = self.location.raw["address"]
+            if "address" in self.location.raw:
+                addr = self.location.raw["address"]
 
-            place = find_place(addr, ["theme_park", "museum", "beach", "suburb"])
+                place = find_place(addr, ["theme_park", "museum", "beach", "suburb"])
 
-            city_places = ["village", "town", "city"]
-            if "suburb" in addr and place != addr["suburb"]:
-                city_places.insert(0, "suburb")
+                city_places = ["village", "town", "city"]
+                if "suburb" in addr and place != addr["suburb"]:
+                    city_places.insert(0, "suburb")
 
-            city = find_place(addr, city_places)
+                city = find_place(addr, city_places)
 
-            if not place and not city:
-                return self.location.address
-            else:
-                if city:
-                    city_str = city + '-' if place else city
+                if not place and not city:
+                    return self.location.address
                 else:
-                    city_str = ''
-                place_str = place if place else ''
+                    if city:
+                        city_str = city + '-' if place else city
+                    else:
+                        city_str = ''
+                    place_str = place if place else ''
 
-                loc = f"{city_str}{place_str}".replace("/", "-").replace(".", "-").replace(":", "-")
-                return loc
+                    loc = f"{city_str}{place_str}".replace("/", "-").replace(".", "-").replace(":", "-")
+                    return loc
+            else:
+                return "Unknown"
         else:
             return "Unknown"
 
